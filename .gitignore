@@ -30,8 +30,8 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files - INCLUDED in repo since projects are private
+# .env* - commented out to allow committing env files
 
 # vercel
 .vercel
