@@ -1,26 +1,61 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-/**
- * POST /api/chat
- * Handles chat message processing and streaming response
- * 
- * Request body:
- * - message: string - User's message
- * - mode: 'academic' | 'clinical' - Response mode
- * - sessionId: string - Current session ID
- * 
- * Response: Streaming text response from Mistral API
- * 
- * TODO: Integrate with:
- * 1. Supabase pgvector for semantic search of textbook chunks
- * 2. Mistral API for streaming completions
- * 3. Citation extraction and linking
- */
+interface NelsonContextItem {
+  id: string
+  chapter_title: string | null
+  page_number: number | null
+  source_file: string | null
+  book_title: string | null
+  snippet: string | null
+  age_groups?: string | null
+  medical_specialty?: string | null
+  clinical_relevance_score?: number | null
+  keywords?: string | null
+}
+
+interface NelsonAnswerResponse {
+  context: NelsonContextItem[]
+  citations?: Array<{
+    chapter_title: string | null
+    page_number: number | null
+    source_file: string | null
+    book_title: string | null
+    age_groups?: string | null
+  }>
+  meta?: any
+}
+
+function buildAnswer(mode: 'academic' | 'clinical', userMessage: string, res: NelsonAnswerResponse) {
+  const header = `# Response from Nelson-GPT\n\n`
+  const intro = mode === 'academic'
+    ? `Academic mode provides detailed textbook-style explanations with comprehensive evidence and citations.\n\n`
+    : `Clinical mode focuses on practical diagnostic and treatment approaches for clinical decision-making.\n\n`
+
+  const context = res.context || []
+  const bullets = context.map((c, i) => {
+    const title = c.chapter_title || 'Untitled section'
+    const page = c.page_number ? ` (p. ${c.page_number})` : ''
+    const book = c.book_title || 'Nelson Textbook of Pediatrics'
+    const snip = (c.snippet || '').trim()
+    const trimmed = snip.length > 600 ? snip.slice(0, 600) + '…' : snip
+    return `- ${title}${page} — ${trimmed}\n  Source: ${book}${c.source_file ? ` • ${c.source_file}` : ''}`
+  }).join('\n\n')
+
+  const citations = (res.citations || []).slice(0, 10).map((c) => {
+    const title = c.chapter_title || 'Untitled section'
+    const page = c.page_number ? `p. ${c.page_number}` : ''
+    return `- ${title}${page ? ` (${page})` : ''}`
+  }).join('\n')
+
+  const footer = `\n\n---\n\nSources:\n${citations || '- See context above'}`
+
+  return `${header}## Mode: ${mode === 'academic' ? 'Academic' : 'Clinical'}\n\n> ${userMessage}\n\n${intro}${bullets}${footer}`.trim()
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { message, mode, sessionId } = await request.json()
 
-    // Validate input
     if (!message || !mode || !sessionId) {
       return NextResponse.json(
         { error: 'Missing required fields' },
@@ -28,60 +63,47 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    /**
-     * TODO: Implement RAG workflow:
-     * 1. Embed user message using OpenAI/Mistral embeddings
-     * 2. Query Supabase pgvector for top-k similar chunks
-     * 3. Construct context prompt with citations
-     * 4. Send to Mistral API with streaming enabled
-     * 5. Parse response and extract citations
-     */
+    const baseUrl = process.env.NELSON_API_URL || 'http://localhost:3000'
 
-    // For now, return a mock streaming response
-    const mockResponse = `
-# Response from Nelson-GPT
+    let answerText = ''
+    try {
+      const r = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'godzilla_answer',
+          q: message,
+          k: mode === 'academic' ? 12 : 8,
+          specialty: 'pediatrics'
+        })
+      })
 
-This is a demonstration response. In production, this would:
+      if (!r.ok) {
+        throw new Error(`Nelson-GPT API error: ${r.status}`)
+      }
 
-1. **Retrieve relevant content** from the Nelson Textbook of Pediatrics using semantic search
-2. **Generate evidence-based answers** using Mistral API
-3. **Include citations** linking to specific chapters and pages
-4. **Stream responses** in real-time for better UX
+      const data: NelsonAnswerResponse = await r.json()
+      answerText = buildAnswer(mode, message, data)
+    } catch (e: any) {
+      answerText = [
+        '# Response from Nelson-GPT',
+        '',
+        'I could not reach the Nelson-GPT API. Showing a placeholder response.',
+        '',
+        `Mode: ${mode === 'academic' ? 'Academic' : 'Clinical'}`,
+        '',
+        'Please verify NELSON_API_URL is set and the service is reachable.'
+      ].join('\n')
+    }
 
-## Mode: ${mode === 'academic' ? 'Academic' : 'Clinical'}
-
-${
-  mode === 'academic'
-    ? 'Academic mode provides detailed textbook-style explanations with comprehensive evidence and citations.'
-    : 'Clinical mode focuses on practical diagnostic and treatment approaches for clinical decision-making.'
-}
-
-## Next Steps
-
-To fully integrate this application:
-
-1. **Set up Supabase** with pgvector extension
-2. **Load Nelson Textbook chunks** into the database
-3. **Configure Mistral API** credentials
-4. **Implement embedding** for semantic search
-5. **Add authentication** if needed
-
----
-
-**Citation Example:** Nelson Textbook of Pediatrics, Chapter 23, p. 456
-    `.trim()
-
-    // Create a ReadableStream for streaming response
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          // Simulate streaming by sending chunks
-          const chunks = mockResponse.split(' ')
+          const chunks = answerText.split(' ')
           for (const chunk of chunks) {
             controller.enqueue(encoder.encode(chunk + ' '))
-            // Small delay to simulate streaming
-            await new Promise((resolve) => setTimeout(resolve, 10))
+            await new Promise((resolve) => setTimeout(resolve, 8))
           }
           controller.close()
         } catch (error) {
